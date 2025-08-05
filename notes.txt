@@ -1,0 +1,213 @@
+- bhai jan sabse pehle iconizer use kiya icones ko edit krne ke liye then uske bad found my self on internet
+- unho ne prebuiltui website use ki jaha se hum prebuilt ui utha sakte he wo sab tailwind pr bana he
+- or phr hum ne context api ka steup kia state management ke liye
+- phr usne google fonts and tailwind install ki
+- product card me ek to card ka color chnag ekia indigo-500 se and replace kia primary se
+- uske bad usi file me card me jo button tha usko bhi replace kia indigo ko primary se
+
+
+- reduce function ke bare me parho
+- or ye sab dekho ke findby id or iske ilawa jo bhi methods hen un sab ke andr kia pass kia jata he
+- spread operator bhi use huwa he controller me
+- or catch block me jo error hota he wo kese kam krta he likhe error.message ka message kaha se ata jata he
+- populate function ke bare me bhi parho
+- order controller ke andar getorders wala handler zarur dekhna 
+- and uske sath hi dekho ke event.preventDefault() ka concept
+- boss jSON.stringify and sath append ke bare me bhi parho or toast ke bare me bhi ache se parho
+- express.raw and also again see the payment gateway integration
+
+import { Order } from "../models/order.model.js";
+import { Product } from "../models/product.model.js";
+import stripe from "stripe";
+import { User } from "../models/user.model.js";
+
+export const placeOrderHandler = async (req, res) => {
+  try {
+    const userId = req.user; // Use the authenticated user ID
+    const { items, address } = req.body;
+    if (!address || !items || items.length === 0) {
+      return res.status(400).json({ success: false, message: "Invalid data" });
+    }
+
+    let amount = await items.reduce(async (acc, item) => {
+      const product = await Product.findById(item.product);
+      return (await acc) + product.offerPrice * item.quantity;
+    }, 0);
+
+    amount += Math.floor(amount * 0.02);
+
+    await Order.create({ userId, items, amount, address, paymentType: "COD" });
+
+    return res
+      .status(200)
+      .json({ success: true, message: "Order Placed successfully" });
+  } catch (error) {
+    console.log(error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const placeOrderStripeHandler = async (req, res) => {
+  try {
+    const { userId, items, address } = req.body;
+    const { origin } = req.headers;
+    if (!address || items.length == 0) {
+      return res.status(400).json({ success: false, message: "Invalid data" });
+    }
+
+    let productData = [];
+
+    let amount = await items.reduce(async (acc, item) => {
+      const product = await Product.findById(item.product);
+      productData.push({
+        name: product.name,
+        price: product.offerPrice,
+        quantity: item.quantity,
+      });
+      return (await acc) + product.offerPrice * item.quantity;
+    }, 0);
+
+    amount += Math.floor(amount * 0.02);
+
+    const order = await Order.create({
+      userId,
+      items,
+      amount,
+      address,
+      paymentType: "Online",
+    });
+
+    const stripeInstance = new stripe(process.env.STRIPE_SECRET_KEY);
+
+    const LINE_ITEMS = productData.map((item) => {
+      return {
+        price_data: {
+          currency: "usd",
+          product_data: {
+            name: item.name,
+          },
+          unit_amount: Math.floor(item.price + item.price * 0.02) * 100,
+        },
+        quantity: item.quantity,
+      };
+    });
+
+    const session = await stripeInstance.checkout.sessions.create({
+      LINE_ITEMS,
+      mode: "payment",
+      success_url: `${origin}/loader?next=my-orders`,
+      cancel_url: `${origin}/cart`,
+      metadata: {
+        orderId: order._id.toString(),
+        userId,
+      },
+    });
+
+    return res.status(200).json({ success: true, url: session.url });
+  } catch (error) {
+    console.log(error.message);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const stripeWebhook = async (req, res) => {
+  const stripeInstance = new stripe(process.env.STRIPE_SECRET_KEY);
+  const sig = req.headers["stripe-signature"];
+  let event;
+  try {
+    event = stripeInstance.webhooks.constructEvent(
+      req.body,
+      sig,
+      process.env.STRIPE_WEBHOOK_SECRET
+    );
+  } catch (error) {
+    return res.status(400).send(`webhook error: ${error.message}`);
+  }
+
+  switch (event.type) {
+    case "payment_intent_succeeded": {
+      const paymentIntent = event.data.object;
+      const paymentIntentId = paymentIntent.id;
+
+      // Find the session related to this payment intent
+      const sessions = await stripeInstance.checkout.sessions.list({
+        payment_intent: paymentIntentId,
+      });
+
+      if (sessions.data.length > 0) {
+        const { orderId, userId } = sessions.data[0].metadata;
+        await Order.findByIdAndUpdate(orderId, { isPaid: true });
+        await User.findByIdAndUpdate(userId, { cartItems: {} });
+      }
+      break;
+    }
+    // Add more cases if needed (e.g. payment_intent_failed)
+    default:
+      console.error(`Unhandled event type ${event.type}`);
+      break;
+  }
+
+  res.json({ received: true });
+};
+
+export const getUserOrdersHandler = async (req, res) => {
+  try {
+    const { userId } = req.body;
+    const orders = await Order.find({
+      userId,
+      $or: [{ paymentType: "COD" }, { isPaid: true }],
+    })
+      .populate("items.product address")
+      .sort({ createdAt: -1 });
+
+    res.status(200).json({ success: true, orders });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// get all orders for seller : api/order/seller
+
+export const getAllOrdersHandler = async (req, res) => {
+  try {
+    const orders = await Order.find({
+      $or: [{ paymentType: "COD" }, { isPaid: true }],
+    })
+      .populate("items.product address")
+      .sort({ createdAt: -1 });
+
+    return res.status(200).json({ success: true, orders });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+
+//address controller
+
+import { Address } from "../models/address.model.js";
+
+export const addAddressHandler = async (req, res) => {
+  try {
+    const { address, userId } = req.body;
+    await Address.create({ ...address, userId });
+    res.status(200).json({
+      success: true,
+      message: "Address added successfully",
+    });
+  } catch (error) {
+    console.log(error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const getAddressHandler = async (req, res) => {
+  try {
+    const { userId } = req.body;
+    const addresses = await Address.find(userId);
+    res.status(200).json({ success: true, addresses });
+  } catch (error) {
+    console.log(error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
